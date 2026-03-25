@@ -222,9 +222,9 @@ export default function Home() {
       const last = event.results[event.results.length - 1];
       const text = last[0].transcript.toLowerCase().trim();
 
-      // Check all agent wake words
+      // Check all agent wake words — name alone is enough
       for (const a of AGENTS) {
-        if (text.includes(a.wakeWord) || text.includes(a.wakeWord.replace('hey ', ''))) {
+        if (text.includes(a.name.toLowerCase()) || text.includes(a.wakeWord)) {
           recognition.stop();
           if (a.id !== agent.id) setAgent(a);
           startRecording();
@@ -350,7 +350,7 @@ export default function Home() {
       {/* Instruction */}
       {state === 'idle' && !conversationMode && (
         <div className="absolute bottom-4 left-4 font-mono text-[11px] text-slate-600">
-          Say &quot;{agent.wakeWord}&quot; to activate
+          Say &quot;{agent.name}&quot; to activate
         </div>
       )}
       {conversationMode && (
