@@ -5,7 +5,7 @@ import './globals.css';
 const mono = JetBrains_Mono({ subsets: ['latin'], variable: '--font-mono' });
 
 export const metadata: Metadata = {
-  title: 'STARK AI — Voice Interface',
+  title: 'SYNAPSE — Voice Interface',
   description: 'Voice-activated AI assistant system',
 };
 

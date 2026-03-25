@@ -243,7 +243,7 @@ export default function Home() {
       <div className="h-screen bg-[#050510] flex flex-col items-center justify-center gap-8">
         <div className="text-center">
           <h1 className="text-4xl font-mono font-bold text-slate-200 tracking-tight">
-            STARK <span style={{ color: agent.color }}>AI</span>
+            SYNAPSE <span style={{ color: agent.color }}>AI</span>
           </h1>
           <p className="text-slate-500 font-mono text-sm mt-2">Voice Interface System v2.0</p>
         </div>
