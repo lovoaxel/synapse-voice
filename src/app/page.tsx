@@ -244,6 +244,53 @@ export default function Home() {
     try { recognition.start(); } catch {}
   }
 
+  // Proactive notifications — poll every 5s for agent-initiated messages
+  const speakNotification = useCallback(async (text: string, agentId: string) => {
+    const notifAgent = AGENTS.find(a => a.id === agentId) || agent;
+    setAgent(notifAgent);
+    playActivation();
+    addMessage('agent', `🔔 ${text}`);
+    setState('speaking');
+
+    try {
+      const ttsRes = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: text.substring(0, 500), voiceId: notifAgent.voiceId }),
+      });
+      if (ttsRes.ok) {
+        const audioBlob = await ttsRes.blob();
+        const audio = new Audio(URL.createObjectURL(audioBlob));
+        audio.onended = () => {
+          enterConversationMode();
+          setState('listening');
+          startRecording();
+        };
+        audio.play();
+      }
+    } catch {
+      setState('idle');
+      startWakeWordListener();
+    }
+  }, [agent, addMessage, enterConversationMode]);
+
+  useEffect(() => {
+    if (!initialized) return;
+    const interval = setInterval(async () => {
+      // Only check when idle — don't interrupt active conversation
+      if (state !== 'idle') return;
+      try {
+        const res = await fetch('/api/notify');
+        const data = await res.json();
+        if (data.notifications?.length > 0) {
+          const notif = data.notifications[0]; // Process one at a time
+          speakNotification(notif.message, notif.agentId);
+        }
+      } catch {}
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [initialized, state, speakNotification]);
+
   // Initialize
   const initialize = async () => {
     try {
