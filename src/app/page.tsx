@@ -18,6 +18,9 @@ export default function Home() {
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
   const startTime = useRef(new Date());
 
+  const [conversationMode, setConversationMode] = useState(false);
+  const conversationTimerRef = useRef<NodeJS.Timeout | null>(null);
+
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -33,16 +36,45 @@ export default function Home() {
     ]);
   }, [agent.id]);
 
+  // Enter conversation mode — stays listening for 10s after each response
+  const enterConversationMode = useCallback(() => {
+    setConversationMode(true);
+    if (conversationTimerRef.current) clearTimeout(conversationTimerRef.current);
+    conversationTimerRef.current = setTimeout(() => {
+      setConversationMode(false);
+      playDeactivation();
+      setState('idle');
+      startWakeWordListener();
+    }, 10000); // 10s of silence = exit conversation
+  }, []);
+
+  // Build context from recent messages for the agent
+  const buildContext = useCallback((newMessage: string) => {
+    const recent = messages.slice(-8); // Last 4 exchanges
+    if (recent.length === 0) return newMessage;
+    const history = recent.map(m => `${m.role === 'user' ? 'Usuario' : 'Agente'}: ${m.text}`).join('\n');
+    return `[Contexto de conversación reciente]\n${history}\n\nUsuario: ${newMessage}`;
+  }, [messages]);
+
   // Send to agent API
   const sendToAgent = useCallback(async (text: string) => {
     setState('thinking');
     addMessage('user', text);
 
+    // Check for exit phrases
+    const lower = text.toLowerCase();
+    if (lower.includes('eso es todo') || lower.includes('gracias') || lower.includes('adiós') || lower.includes('hasta luego')) {
+      setConversationMode(false);
+      if (conversationTimerRef.current) clearTimeout(conversationTimerRef.current);
+    }
+
     try {
+      // Send with conversation context
+      const messageWithContext = conversationMode ? buildContext(text) : text;
       const res = await fetch('/api/agent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, agentId: agent.id }),
+        body: JSON.stringify({ message: messageWithContext, agentId: agent.id }),
       });
       const data = await res.json();
       const reply = data.text || data.error || 'Sin respuesta';
@@ -61,9 +93,11 @@ export default function Home() {
           const audioUrl = URL.createObjectURL(audioBlob);
           const audio = new Audio(audioUrl);
           audio.onended = () => {
-            playDeactivation();
-            setState('idle');
-            startWakeWordListener();
+            // CONVERSATION MODE: keep listening instead of going back to wake word
+            enterConversationMode();
+            setState('listening');
+            setTranscript('Escuchando...');
+            startRecording();
           };
           audio.play();
           return;
@@ -72,7 +106,11 @@ export default function Home() {
         // TTS failed, fall back to browser speech
         const utterance = new SpeechSynthesisUtterance(reply.substring(0, 300));
         utterance.lang = 'es-MX';
-        utterance.onend = () => { setState('idle'); startWakeWordListener(); };
+        utterance.onend = () => {
+          enterConversationMode();
+          setState('listening');
+          startRecording();
+        };
         speechSynthesis.speak(utterance);
         return;
       }
@@ -82,7 +120,7 @@ export default function Home() {
       setState('error');
       setTimeout(() => { setState('idle'); startWakeWordListener(); }, 2000);
     }
-  }, [agent, addMessage]);
+  }, [agent, addMessage, conversationMode, buildContext, enterConversationMode]);
 
   // Transcribe audio blob
   const transcribeAudio = useCallback(async (audioBlob: Blob) => {
@@ -310,9 +348,14 @@ export default function Home() {
       <StatusBar agent={agent} state={state} messageCount={messages.length} startTime={startTime.current} />
 
       {/* Instruction */}
-      {state === 'idle' && (
+      {state === 'idle' && !conversationMode && (
         <div className="absolute bottom-4 left-4 font-mono text-[11px] text-slate-600">
           Say &quot;{agent.wakeWord}&quot; to activate
+        </div>
+      )}
+      {conversationMode && (
+        <div className="absolute bottom-4 left-4 font-mono text-[11px] animate-pulse" style={{ color: agent.color }}>
+          🔄 Conversación activa — sigue hablando o di &quot;eso es todo&quot;
         </div>
       )}
     </div>
