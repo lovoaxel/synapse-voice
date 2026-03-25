@@ -1,4 +1,4 @@
-export type VoiceState = "idle" | "listening" | "thinking" | "speaking";
+export type OrbState = 'idle' | 'listening' | 'thinking' | 'speaking' | 'error';
 
 export interface Agent {
   id: string;
@@ -6,32 +6,32 @@ export interface Agent {
   emoji: string;
   color: string;
   wakeWord: string;
-  greeting: string;
+  voiceId: string;
 }
 
 export interface Message {
   id: string;
-  role: "user" | "agent";
-  content: string;
-  timestamp: number;
-  agentId?: string;
+  role: 'user' | 'agent';
+  text: string;
+  agentId: string;
+  timestamp: Date;
 }
 
-export const DEFAULT_AGENTS: Agent[] = [
+export const AGENTS: Agent[] = [
   {
-    id: "jarvis",
-    name: "Jarvis",
-    emoji: "\u{1F3A9}",
-    color: "#3b82f6",
-    wakeWord: "hey jarvis",
-    greeting: "At your service, sir.",
+    id: 'main',
+    name: 'JARVIS',
+    emoji: '🎩',
+    color: '#3b82f6',
+    wakeWord: 'hey jarvis',
+    voiceId: 'JBFqnCBsd6RMkjVDRZzb',
   },
   {
-    id: "cipher",
-    name: "CIPHER",
-    emoji: "\u{1F510}",
-    color: "#22c55e",
-    wakeWord: "hey cipher",
-    greeting: "CIPHER online. Awaiting your command.",
+    id: 'coder',
+    name: 'CIPHER',
+    emoji: '🔐',
+    color: '#22c55e',
+    wakeWord: 'hey cipher',
+    voiceId: 'onwK4e9ZLuTAKqWW03F9',
   },
 ];

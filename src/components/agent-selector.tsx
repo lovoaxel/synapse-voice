@@ -1,46 +1,39 @@
-"use client";
+'use client';
 
-import { motion } from "framer-motion";
-import type { Agent } from "@/lib/types";
-
-interface AgentSelectorProps {
-  agents: Agent[];
-  activeAgent: Agent;
-  onSelect: (agent: Agent) => void;
-}
+import { AGENTS, type Agent } from '@/lib/types';
 
 export function AgentSelector({
-  agents,
   activeAgent,
   onSelect,
-}: AgentSelectorProps) {
+}: {
+  activeAgent: Agent;
+  onSelect: (agent: Agent) => void;
+}) {
   return (
-    <div className="flex items-center gap-2">
-      {agents.map((agent) => {
+    <div className="flex gap-2">
+      {AGENTS.map((agent) => {
         const isActive = agent.id === activeAgent.id;
         return (
-          <motion.button
+          <button
             key={agent.id}
             onClick={() => onSelect(agent)}
-            className="relative px-4 py-1.5 rounded-full text-xs font-medium transition-colors cursor-pointer"
+            className="flex items-center gap-2 px-4 py-2 rounded-full font-mono text-sm transition-all duration-300"
             style={{
-              color: isActive ? agent.color : "#94a3b8",
-              backgroundColor: isActive ? `${agent.color}15` : "transparent",
-              border: `1px solid ${isActive ? `${agent.color}40` : "#1e1e3a"}`,
+              background: isActive ? agent.color + '25' : 'transparent',
+              border: `1px solid ${isActive ? agent.color : '#334155'}`,
+              color: isActive ? agent.color : '#64748b',
+              boxShadow: isActive ? `0 0 20px ${agent.color}20` : 'none',
             }}
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
           >
-            <span className="mr-1.5">{agent.emoji}</span>
-            {agent.name}
+            <span>{agent.emoji}</span>
+            <span>{agent.name}</span>
             {isActive && (
-              <motion.div
-                className="absolute -bottom-px left-1/2 -translate-x-1/2 h-px w-8"
-                style={{ backgroundColor: agent.color }}
-                layoutId="activeAgent"
+              <span
+                className="w-2 h-2 rounded-full animate-pulse"
+                style={{ background: agent.color }}
               />
             )}
-          </motion.button>
+          </button>
         );
       })}
     </div>

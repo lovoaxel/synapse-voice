@@ -1,191 +1,320 @@
-"use client";
+'use client';
 
-import { useState, useCallback, useEffect } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import { VoiceOrb } from "@/components/voice-orb";
-import { Waveform } from "@/components/waveform";
-import { AgentSelector } from "@/components/agent-selector";
-import { MessageLog } from "@/components/message-log";
-import { StatusBar } from "@/components/status-bar";
-import { useVoice } from "@/hooks/use-voice";
-import { useAgent } from "@/hooks/use-agent";
-import { useTTS } from "@/hooks/use-tts";
-import { DEFAULT_AGENTS } from "@/lib/types";
-import type { VoiceState, Agent } from "@/lib/types";
+import { useState, useRef, useCallback, useEffect } from 'react';
+import { VoiceOrb } from '@/components/voice-orb';
+import { Waveform } from '@/components/waveform';
+import { AgentSelector } from '@/components/agent-selector';
+import { MessageLog } from '@/components/message-log';
+import { StatusBar } from '@/components/status-bar';
+import { AGENTS, type Agent, type Message, type OrbState } from '@/lib/types';
+import { playActivation, playDeactivation, playError, playStartup } from '@/lib/sounds';
 
 export default function Home() {
-  const [agents] = useState(DEFAULT_AGENTS);
-  const [activeAgent, setActiveAgent] = useState<Agent>(DEFAULT_AGENTS[1]);
-  const [voiceState, setVoiceState] = useState<VoiceState>("idle");
-  const [activated, setActivated] = useState(false);
+  const [initialized, setInitialized] = useState(false);
+  const [state, setState] = useState<OrbState>('idle');
+  const [agent, setAgent] = useState<Agent>(AGENTS[0]);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [transcript, setTranscript] = useState('');
+  const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
+  const startTime = useRef(new Date());
 
-  // Load saved agent preference
-  useEffect(() => {
-    const saved = localStorage.getItem("cipher-voice-agent");
-    if (saved) {
-      const found = DEFAULT_AGENTS.find((a) => a.id === saved);
-      if (found) setActiveAgent(found);
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
+  const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+
+  const addMessage = useCallback((role: 'user' | 'agent', text: string) => {
+    setMessages((prev) => [
+      ...prev,
+      { id: crypto.randomUUID(), role, text, agentId: agent.id, timestamp: new Date() },
+    ]);
+  }, [agent.id]);
+
+  // Send to agent API
+  const sendToAgent = useCallback(async (text: string) => {
+    setState('thinking');
+    addMessage('user', text);
+
+    try {
+      const res = await fetch('/api/agent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text, agentId: agent.id }),
+      });
+      const data = await res.json();
+      const reply = data.text || data.error || 'Sin respuesta';
+      addMessage('agent', reply);
+
+      // TTS
+      setState('speaking');
+      try {
+        const ttsRes = await fetch('/api/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: reply.substring(0, 500), voiceId: agent.voiceId }),
+        });
+        if (ttsRes.ok) {
+          const audioBlob = await ttsRes.blob();
+          const audioUrl = URL.createObjectURL(audioBlob);
+          const audio = new Audio(audioUrl);
+          audio.onended = () => {
+            playDeactivation();
+            setState('idle');
+            startWakeWordListener();
+          };
+          audio.play();
+          return;
+        }
+      } catch {
+        // TTS failed, fall back to browser speech
+        const utterance = new SpeechSynthesisUtterance(reply.substring(0, 300));
+        utterance.lang = 'es-MX';
+        utterance.onend = () => { setState('idle'); startWakeWordListener(); };
+        speechSynthesis.speak(utterance);
+        return;
+      }
+    } catch {
+      playError();
+      addMessage('agent', 'Error de conexión con el agente.');
+      setState('error');
+      setTimeout(() => { setState('idle'); startWakeWordListener(); }, 2000);
     }
-  }, []);
+  }, [agent, addMessage]);
 
-  const { messages, tokensUsed, lastCommandTime, sendMessage } = useAgent();
-  const { speak } = useTTS();
+  // Transcribe audio blob
+  const transcribeAudio = useCallback(async (audioBlob: Blob) => {
+    setState('thinking');
+    setTranscript('Transcribiendo...');
+    try {
+      const formData = new FormData();
+      formData.append('audio', audioBlob);
+      const res = await fetch('/api/transcribe', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (data.text && data.text.trim()) {
+        setTranscript(data.text);
+        await sendToAgent(data.text);
+      } else {
+        setTranscript('');
+        setState('idle');
+        startWakeWordListener();
+      }
+    } catch {
+      playError();
+      setState('error');
+      setTimeout(() => { setState('idle'); startWakeWordListener(); }, 2000);
+    }
+  }, [sendToAgent]);
 
-  const handleTranscription = useCallback(
-    async (text: string) => {
-      const response = await sendMessage(text, activeAgent.id);
-      setVoiceState("speaking");
-      await speak(response);
-      setVoiceState("idle");
-    },
-    [activeAgent.id, sendMessage, speak]
-  );
+  // Start recording after wake word
+  const startRecording = useCallback(() => {
+    if (!streamRef.current) return;
+    playActivation();
+    setState('listening');
+    setTranscript('Escuchando...');
+    audioChunksRef.current = [];
 
-  const handleStateChange = useCallback((state: VoiceState) => {
-    setVoiceState(state);
-  }, []);
+    const mediaRecorder = new MediaRecorder(streamRef.current, { mimeType: 'audio/webm' });
+    mediaRecorderRef.current = mediaRecorder;
 
-  const { isListening, startListening, stopListening } = useVoice({
-    activeAgent,
-    onTranscription: handleTranscription,
-    onStateChange: handleStateChange,
-  });
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) audioChunksRef.current.push(e.data);
+    };
 
-  const handleAgentSelect = useCallback((agent: Agent) => {
-    setActiveAgent(agent);
-    localStorage.setItem("cipher-voice-agent", agent.id);
-  }, []);
+    mediaRecorder.onstop = () => {
+      const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+      if (blob.size > 1000) {
+        transcribeAudio(blob);
+      } else {
+        setState('idle');
+        startWakeWordListener();
+      }
+    };
 
-  const handleActivate = useCallback(() => {
-    setActivated(true);
-    startListening();
-  }, [startListening]);
+    mediaRecorder.start(250);
 
-  // Keyboard shortcut: Space to toggle
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.code === "Space" && e.target === document.body) {
-        e.preventDefault();
-        if (!activated) {
-          handleActivate();
-        } else if (isListening) {
-          stopListening();
-        } else {
-          startListening();
+    // Silence detection
+    const checkSilence = () => {
+      if (!analyserRef.current) return;
+      const data = new Uint8Array(analyserRef.current.frequencyBinCount);
+      analyserRef.current.getByteTimeDomainData(data);
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) sum += Math.abs(data[i] - 128);
+      const avg = sum / data.length;
+
+      if (avg < 2) {
+        // Silence detected
+        if (!silenceTimerRef.current) {
+          silenceTimerRef.current = setTimeout(() => {
+            mediaRecorder.stop();
+          }, 2000);
+        }
+      } else {
+        if (silenceTimerRef.current) {
+          clearTimeout(silenceTimerRef.current);
+          silenceTimerRef.current = null;
         }
       }
     };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [activated, isListening, handleActivate, startListening, stopListening]);
 
-  const orbColor = activeAgent.color;
+    const silenceInterval = setInterval(checkSilence, 200);
+    // Safety: stop after 30s max
+    const maxTimer = setTimeout(() => { clearInterval(silenceInterval); mediaRecorder.stop(); }, 30000);
+    mediaRecorder.addEventListener('stop', () => { clearInterval(silenceInterval); clearTimeout(maxTimer); });
+  }, [transcribeAudio]);
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  function startWakeWordListener() {
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch {}
+    }
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = 'es-MX';
+    recognitionRef.current = recognition;
+
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
+      const last = event.results[event.results.length - 1];
+      const text = last[0].transcript.toLowerCase().trim();
+
+      // Check all agent wake words
+      for (const a of AGENTS) {
+        if (text.includes(a.wakeWord) || text.includes(a.wakeWord.replace('hey ', ''))) {
+          recognition.stop();
+          if (a.id !== agent.id) setAgent(a);
+          startRecording();
+          return;
+        }
+      }
+    };
+
+    recognition.onerror = () => {
+      setTimeout(startWakeWordListener, 1000);
+    };
+
+    recognition.onend = () => {
+      if (state === 'idle') setTimeout(startWakeWordListener, 500);
+    };
+
+    try { recognition.start(); } catch {}
+  }
+
+  // Initialize
+  const initialize = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+
+      const audioCtx = new AudioContext();
+      audioCtxRef.current = audioCtx;
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyserNode = audioCtx.createAnalyser();
+      analyserNode.fftSize = 2048;
+      source.connect(analyserNode);
+      analyserRef.current = analyserNode;
+      setAnalyser(analyserNode);
+
+      playStartup();
+      setInitialized(true);
+      setState('idle');
+      startWakeWordListener();
+    } catch {
+      playError();
+      setState('error');
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) try { recognitionRef.current.stop(); } catch {}
+      if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
+    };
+  }, []);
+
+  if (!initialized) {
+    return (
+      <div className="h-screen bg-[#050510] flex flex-col items-center justify-center gap-8">
+        <div className="text-center">
+          <h1 className="text-4xl font-mono font-bold text-slate-200 tracking-tight">
+            STARK <span style={{ color: agent.color }}>AI</span>
+          </h1>
+          <p className="text-slate-500 font-mono text-sm mt-2">Voice Interface System v2.0</p>
+        </div>
+        <button
+          onClick={initialize}
+          className="px-8 py-3 rounded-full font-mono text-sm tracking-widest uppercase transition-all duration-300 hover:scale-105"
+          style={{
+            border: `1px solid ${agent.color}`,
+            color: agent.color,
+            boxShadow: `0 0 30px ${agent.color}20`,
+          }}
+        >
+          Initialize System
+        </button>
+        <p className="text-slate-600 font-mono text-xs">Requires microphone access • Chrome recommended</p>
+      </div>
+    );
+  }
 
   return (
-    <div className="h-full flex flex-col grid-bg scanlines relative overflow-hidden">
-      {/* Status bar */}
-      <StatusBar
-        state={voiceState}
-        activeAgent={activeAgent}
-        tokensUsed={tokensUsed}
-        lastCommandTime={lastCommandTime}
-        isListening={isListening}
-      />
-
-      {/* Agent selector */}
-      <div className="flex justify-center py-3">
-        <AgentSelector
-          agents={agents}
-          activeAgent={activeAgent}
-          onSelect={handleAgentSelect}
-        />
-      </div>
-
-      {/* Main content */}
-      <div className="flex-1 flex flex-col items-center justify-center relative min-h-0">
-        <AnimatePresence mode="wait">
-          {!activated ? (
-            <motion.div
-              key="activate"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0, scale: 0.9 }}
-              className="flex flex-col items-center gap-8"
-            >
-              <VoiceOrb state="idle" color={orbColor} />
-              <motion.button
-                onClick={handleActivate}
-                className="px-6 py-2.5 rounded-full text-xs font-medium tracking-wider border cursor-pointer"
-                style={{
-                  color: orbColor,
-                  borderColor: `${orbColor}40`,
-                  backgroundColor: `${orbColor}08`,
-                }}
-                whileHover={{
-                  scale: 1.05,
-                  backgroundColor: `${orbColor}15`,
-                }}
-                whileTap={{ scale: 0.95 }}
-              >
-                INITIALIZE SYSTEM
-              </motion.button>
-              <p className="text-text-muted text-[10px] tracking-wider">
-                PRESS SPACE OR CLICK TO ACTIVATE
-              </p>
-            </motion.div>
-          ) : (
-            <motion.div
-              key="active"
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              className="flex flex-col items-center gap-4 w-full max-w-2xl flex-1 min-h-0"
-            >
-              {/* Orb + Waveform */}
-              <div className="flex flex-col items-center gap-4 py-4 shrink-0">
-                <VoiceOrb state={voiceState} color={orbColor} />
-                <Waveform state={voiceState} color={orbColor} />
-              </div>
-
-              {/* Wake word hint */}
-              <motion.p
-                className="text-[10px] text-text-muted tracking-wider shrink-0"
-                animate={{ opacity: voiceState === "idle" ? [0.3, 0.7, 0.3] : 0 }}
-                transition={{ duration: 3, repeat: Infinity }}
-              >
-                SAY &quot;{activeAgent.wakeWord.toUpperCase()}&quot; TO BEGIN
-              </motion.p>
-
-              {/* Message log */}
-              <div className="flex-1 w-full min-h-0 border-t border-void-lighter/30">
-                <div className="h-full flex flex-col">
-                  <MessageLog messages={messages} agents={agents} />
-                </div>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
-
-      {/* Bottom status */}
-      <div className="flex items-center justify-between px-4 py-2 border-t border-void-lighter/30">
-        <span className="text-[10px] text-text-muted tracking-wider">
-          CIPHER VOICE v1.0.0
-        </span>
+    <div
+      className="h-screen bg-[#050510] flex flex-col overflow-hidden relative"
+      style={{
+        backgroundImage:
+          'linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px)',
+        backgroundSize: '50px 50px',
+      }}
+    >
+      {/* Top bar */}
+      <div className="flex items-center justify-between px-6 py-4">
         <div className="flex items-center gap-3">
-          <span className="text-[10px] text-text-muted">
-            GROQ WHISPER + OPENCLAW
+          <span className="text-2xl">{agent.emoji}</span>
+          <span className="font-mono font-bold text-lg" style={{ color: agent.color }}>
+            {agent.name}
           </span>
-          {isListening && (
-            <motion.button
-              onClick={stopListening}
-              className="text-[10px] text-red-500/60 hover:text-red-500 tracking-wider cursor-pointer"
-              whileHover={{ scale: 1.05 }}
-            >
-              [STOP]
-            </motion.button>
-          )}
+          <span
+            className="w-2 h-2 rounded-full animate-pulse"
+            style={{ background: '#22c55e', boxShadow: '0 0 8px #22c55e' }}
+          />
+        </div>
+        <AgentSelector activeAgent={agent} onSelect={(a) => { setAgent(a); }} />
+      </div>
+
+      {/* Orb */}
+      <div className="flex-1 flex flex-col items-center justify-center -mt-16">
+        <VoiceOrb state={state} agentColor={agent.color} />
+        {transcript && (
+          <p className="font-mono text-sm text-slate-400 mt-4 max-w-md text-center animate-pulse">
+            {transcript}
+          </p>
+        )}
+        <Waveform analyser={analyser} color={agent.color} />
+      </div>
+
+      {/* Message log */}
+      <div className="h-[30vh] px-6 pb-4 flex flex-col">
+        <div className="flex-1 rounded-2xl p-4 backdrop-blur-md overflow-hidden flex flex-col"
+          style={{ background: '#0f172a80', border: '1px solid #1e293b' }}>
+          <MessageLog messages={messages} agentColor={agent.color} />
         </div>
       </div>
+
+      {/* Status */}
+      <StatusBar agent={agent} state={state} messageCount={messages.length} startTime={startTime.current} />
+
+      {/* Instruction */}
+      {state === 'idle' && (
+        <div className="absolute bottom-4 left-4 font-mono text-[11px] text-slate-600">
+          Say &quot;{agent.wakeWord}&quot; to activate
+        </div>
+      )}
     </div>
   );
 }
